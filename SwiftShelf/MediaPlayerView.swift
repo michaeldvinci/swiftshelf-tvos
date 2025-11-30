@@ -533,7 +533,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         timeObserver = nil
         endObserver = nil
-        
+
         // Remove per-item NotificationCenter tokens
         for token in perItemNotificationTokens { NotificationCenter.default.removeObserver(token) }
         perItemNotificationTokens.removeAll()
@@ -541,17 +541,13 @@ final class PlayerViewModel: NSObject, ObservableObject {
         // Invalidate KVO observations
         statusObservations.removeAll()
         playerItemChangeObservation = nil
-        
+
         player = nil
         cancelSleepTimer()
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
-        
-        // Properly cleanup remote command targets
-        let cmd = MPRemoteCommandCenter.shared()
-        cmd.playCommand.removeTarget(nil)
-        cmd.pauseCommand.removeTarget(nil)
-        cmd.skipBackwardCommand.removeTarget(nil)
-        cmd.skipForwardCommand.removeTarget(nil)
+
+        // NOTE: Do NOT remove remote command targets here
+        // GlobalAudioManager owns the remote command handlers and they should persist
     }
 
     func setupTrackEndObserver() {
@@ -650,8 +646,45 @@ final class PlayerViewModel: NSObject, ObservableObject {
     }
 
     // MARK: Controls
-    func play() { player?.play(); player?.rate = rate; isPlaying = true; updateNowPlaying() }
-    func pause() { player?.pause(); isPlaying = false; updateNowPlaying() }
+    func play() {
+        print("[PlayerViewModel] ▶️ play() called")
+        print("[PlayerViewModel] ▶️ player is nil: \(player == nil)")
+        if let player = player {
+            print("[PlayerViewModel] ▶️ player.currentItem is nil: \(player.currentItem == nil)")
+            print("[PlayerViewModel] ▶️ player.status: \(player.status.rawValue)")
+            print("[PlayerViewModel] ▶️ player.timeControlStatus: \(player.timeControlStatus.rawValue)")
+            if let currentItem = player.currentItem {
+                print("[PlayerViewModel] ▶️ currentItem.status: \(currentItem.status.rawValue)")
+            }
+        }
+
+        // Ensure we're receiving remote control events
+        UIApplication.shared.beginReceivingRemoteControlEvents()
+
+        player?.play()
+        player?.rate = rate
+        isPlaying = true
+        print("[PlayerViewModel] ▶️ After play - timeControlStatus: \(player?.timeControlStatus.rawValue ?? -1)")
+        updateNowPlaying()
+    }
+
+    func pause() {
+        print("[PlayerViewModel] ⏸️ pause() called")
+        // Use rate = 0 instead of pause() to maintain player association with Now Playing
+        // This helps tvOS continue routing remote commands to our app
+        player?.rate = 0
+        isPlaying = false
+        // Force a full update (not elapsedOnly) to ensure playback rate is set to 0
+        updateNowPlaying(elapsedOnly: false)
+
+        // Keep audio session active so remote commands continue to work
+        do {
+            try AVAudioSession.sharedInstance().setActive(true)
+            print("[PlayerViewModel] ⏸️ Audio session kept active for remote commands")
+        } catch {
+            print("[PlayerViewModel] ⏸️ Failed to keep audio session active: \(error)")
+        }
+    }
 
     func togglePlayPause() { isPlaying ? pause() : play() }
 
@@ -916,29 +949,19 @@ final class PlayerViewModel: NSObject, ObservableObject {
         do {
             try session.setCategory(.playback, options: [.allowAirPlay, .allowBluetoothHFP])
             try session.setActive(true)
-        } catch { print("[AudioSession] error: \(error)") }
+            // Ensure we receive remote control events
+            UIApplication.shared.beginReceivingRemoteControlEvents()
+            print("[PlayerViewModel] ✅ Audio session configured and receiving remote events")
+        } catch {
+            print("[AudioSession] error: \(error)")
+        }
     }
 
     func setupRemoteCommands() {
-        AppLogger.shared.log("PlayerVM", "setupRemoteCommands")
-        let cmd = MPRemoteCommandCenter.shared()
-        
-        // Remove existing targets first to prevent duplicates
-        cmd.playCommand.removeTarget(nil)
-        cmd.pauseCommand.removeTarget(nil)
-        cmd.skipBackwardCommand.removeTarget(nil)
-        cmd.skipForwardCommand.removeTarget(nil)
-        
-        cmd.playCommand.isEnabled = true
-        cmd.playCommand.addTarget { [weak self] _ in self?.play(); return .success }
-        cmd.pauseCommand.isEnabled = true
-        cmd.pauseCommand.addTarget { [weak self] _ in self?.pause(); return .success }
-        cmd.skipBackwardCommand.isEnabled = true
-        cmd.skipBackwardCommand.preferredIntervals = [15]
-        cmd.skipBackwardCommand.addTarget { [weak self] _ in self?.skip(-15); return .success }
-        cmd.skipForwardCommand.isEnabled = true
-        cmd.skipForwardCommand.preferredIntervals = [15]
-        cmd.skipForwardCommand.addTarget { [weak self] _ in self?.skip(15); return .success }
+        // NOTE: Remote commands are now handled by GlobalAudioManager
+        // This method is kept for backward compatibility but does nothing
+        // GlobalAudioManager.setupRemoteCommands() handles play/pause/toggle
+        AppLogger.shared.log("PlayerVM", "setupRemoteCommands - delegating to GlobalAudioManager")
     }
 
     func updateNowPlaying(elapsedOnly: Bool = false) {
@@ -948,10 +971,16 @@ final class PlayerViewModel: NSObject, ObservableObject {
             info[MPMediaItemPropertyTitle] = item.title
             if let author = item.authorNameLF ?? item.authorName { info[MPMediaItemPropertyArtist] = author }
             info[MPMediaItemPropertyPlaybackDuration] = duration
-            info[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? rate : 0.0
         }
+        // Always update playback rate and elapsed time to maintain Now Playing status
+        info[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? Double(rate) : 0.0
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = currentTime
+        // Set default playback rate (what rate to use when play is pressed)
+        info[MPNowPlayingInfoPropertyDefaultPlaybackRate] = Double(rate)
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+
+        // Explicitly set playback state to help tvOS route remote commands correctly
+        MPNowPlayingInfoCenter.default().playbackState = isPlaying ? .playing : .paused
     }
 
     func setupPlayerItemErrorObserver(_ playerItem: AVPlayerItem) {
@@ -1279,6 +1308,10 @@ struct MediaPlayerView: View {
             if move == .down {
                 focusMiniPlayer = true
             }
+        }
+        .onPlayPauseCommand {
+            print("[MediaPlayerView] 🎮 onPlayPauseCommand received")
+            audioManager.togglePlayPause()
         }
     }
 

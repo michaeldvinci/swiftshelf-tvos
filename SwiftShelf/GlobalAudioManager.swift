@@ -55,29 +55,102 @@ final class GlobalAudioManager: NSObject, ObservableObject {
     private func setupRemoteCommands() {
         let commandCenter = MPRemoteCommandCenter.shared()
 
+        print("[GlobalAudioManager] 🎮 Setting up ALL remote commands...")
+
+        // Play command
         commandCenter.playCommand.isEnabled = true
         commandCenter.playCommand.addTarget { [weak self] _ in
+            print("[GlobalAudioManager] 🎮 REMOTE: playCommand received")
             Task { @MainActor in
                 self?.play()
             }
             return .success
         }
 
+        // Pause command
         commandCenter.pauseCommand.isEnabled = true
         commandCenter.pauseCommand.addTarget { [weak self] _ in
+            print("[GlobalAudioManager] 🎮 REMOTE: pauseCommand received")
             Task { @MainActor in
                 self?.pause()
             }
             return .success
         }
 
+        // Toggle play/pause command
         commandCenter.togglePlayPauseCommand.isEnabled = true
         commandCenter.togglePlayPauseCommand.addTarget { [weak self] _ in
+            print("[GlobalAudioManager] 🎮 REMOTE: togglePlayPauseCommand received")
             Task { @MainActor in
                 self?.togglePlayPause()
             }
             return .success
         }
+
+        // Stop command - some systems send this
+        commandCenter.stopCommand.isEnabled = true
+        commandCenter.stopCommand.addTarget { [weak self] _ in
+            print("[GlobalAudioManager] 🎮 REMOTE: stopCommand received")
+            Task { @MainActor in
+                self?.pause()
+            }
+            return .success
+        }
+
+        // Skip commands
+        commandCenter.skipBackwardCommand.isEnabled = true
+        commandCenter.skipBackwardCommand.preferredIntervals = [15]
+        commandCenter.skipBackwardCommand.addTarget { [weak self] _ in
+            print("[GlobalAudioManager] 🎮 REMOTE: skipBackwardCommand received")
+            Task { @MainActor in
+                self?.skip(-15)
+            }
+            return .success
+        }
+
+        commandCenter.skipForwardCommand.isEnabled = true
+        commandCenter.skipForwardCommand.preferredIntervals = [15]
+        commandCenter.skipForwardCommand.addTarget { [weak self] _ in
+            print("[GlobalAudioManager] 🎮 REMOTE: skipForwardCommand received")
+            Task { @MainActor in
+                self?.skip(15)
+            }
+            return .success
+        }
+
+        // Next/Previous track commands
+        commandCenter.nextTrackCommand.isEnabled = true
+        commandCenter.nextTrackCommand.addTarget { [weak self] _ in
+            print("[GlobalAudioManager] 🎮 REMOTE: nextTrackCommand received")
+            Task { @MainActor in
+                self?.nextChapter()
+            }
+            return .success
+        }
+
+        commandCenter.previousTrackCommand.isEnabled = true
+        commandCenter.previousTrackCommand.addTarget { [weak self] _ in
+            print("[GlobalAudioManager] 🎮 REMOTE: previousTrackCommand received")
+            Task { @MainActor in
+                self?.previousChapter()
+            }
+            return .success
+        }
+
+        // Change playback position command (scrubbing)
+        commandCenter.changePlaybackPositionCommand.isEnabled = true
+        commandCenter.changePlaybackPositionCommand.addTarget { [weak self] event in
+            guard let event = event as? MPChangePlaybackPositionCommandEvent else {
+                return .commandFailed
+            }
+            print("[GlobalAudioManager] 🎮 REMOTE: changePlaybackPositionCommand to \(event.positionTime)s")
+            Task { @MainActor in
+                self?.seek(to: event.positionTime)
+            }
+            return .success
+        }
+
+        print("[GlobalAudioManager] 🎮 Remote commands setup complete")
     }
     
     func loadItem(_ item: LibraryItem, appVM: ViewModel, startTime: Double? = nil) async {
@@ -163,6 +236,8 @@ final class GlobalAudioManager: NSObject, ObservableObject {
         print("[GlobalAudioManager] currentItem.id: \(currentItem?.id ?? "nil")")
         print("[GlobalAudioManager] currentItem.duration: \(currentItem?.duration.map { String($0) } ?? "nil")")
         print("[GlobalAudioManager] currentSessionId: \(currentSessionId ?? "nil")")
+        print("[GlobalAudioManager] playerViewModel is nil: \(playerViewModel == nil)")
+        print("[GlobalAudioManager] playerViewModel?.player is nil: \(playerViewModel?.player == nil)")
         print("===========================================")
 
         // Apply cached resume position if this is the first play
@@ -172,7 +247,9 @@ final class GlobalAudioManager: NSObject, ObservableObject {
             pendingResumeSeconds = nil
         }
 
+        print("[GlobalAudioManager] ▶️ Calling playerViewModel?.play()...")
         playerViewModel?.play()
+        print("[GlobalAudioManager] ▶️ playerViewModel?.play() returned")
 
         // Start periodic timers for session sync (20s) and progress PATCH (90s)
         startPeriodicTimers()
@@ -197,6 +274,14 @@ final class GlobalAudioManager: NSObject, ObservableObject {
         // Do final sync with current state before stopping timers
         saveProgressAndSyncSession()
 
+        // Ensure remote commands stay enabled after pause
+        // This is critical for tvOS to continue routing play commands to our app
+        let commandCenter = MPRemoteCommandCenter.shared()
+        commandCenter.playCommand.isEnabled = true
+        commandCenter.pauseCommand.isEnabled = true
+        commandCenter.togglePlayPauseCommand.isEnabled = true
+        print("[GlobalAudioManager] ⏸️ Remote commands confirmed enabled after pause")
+
         // NOTE: Session stays open during pause. It will close when:
         // - User loads a different item (stopCurrentPlayback)
         // - App terminates
@@ -204,38 +289,21 @@ final class GlobalAudioManager: NSObject, ObservableObject {
     }
     
     func togglePlayPause() {
-        print("[GlobalAudioManager] ⏯️ Toggle play/pause requested")
+        print("===========================================")
+        print("[GlobalAudioManager] ⏯️⏯️⏯️ TOGGLE PLAY/PAUSE ⏯️⏯️⏯️")
+        print("[GlobalAudioManager] ⏯️ isPlaying (GlobalAudioManager): \(isPlaying)")
+        print("[GlobalAudioManager] ⏯️ playerViewModel?.isPlaying: \(playerViewModel?.isPlaying ?? false)")
+        print("[GlobalAudioManager] ⏯️ playerViewModel is nil: \(playerViewModel == nil)")
+        print("===========================================")
 
-        // Check current state before toggle
-        let wasPlaying = isPlaying
-
-        playerViewModel?.togglePlayPause()
-
-        // Wait a moment for the state to update, then handle timers
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            guard let self = self else { return }
-
-            if self.isPlaying && !wasPlaying {
-                // Transitioned from paused to playing
-                print("[GlobalAudioManager] ▶️ Resumed from pause - restarting timers")
-
-                // IMPORTANT: Reset lastSyncTime to prevent inflated delta on first sync after resume
-                self.lastSyncTime = Date()
-
-                self.startPeriodicTimers()
-
-                // Start session if needed
-                if self.currentSessionId == nil {
-                    self.startPlaybackSession()
-                }
-            } else if !self.isPlaying && wasPlaying {
-                // Transitioned from playing to paused
-                print("[GlobalAudioManager] ⏸️ Paused - stopping timers and saving (session stays open)")
-                self.stopPeriodicTimers()
-                self.saveProgressAndSyncSession()
-
-                // NOTE: Session stays open during pause (matches official app)
-            }
+        // Directly call play() or pause() based on current state
+        // This avoids the state sync issues with delegating to playerViewModel.togglePlayPause()
+        if isPlaying {
+            print("[GlobalAudioManager] ⏯️ -> Calling pause()")
+            pause()
+        } else {
+            print("[GlobalAudioManager] ⏯️ -> Calling play()")
+            play()
         }
     }
     

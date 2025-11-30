@@ -336,33 +336,77 @@ struct ContentView: View {
         }
     }
 
+    @State private var connectionLoginMethod: LoginMethod = .apiKey
+    @State private var connectionUsername: String = ""
+    @State private var connectionPassword: String = ""
+    @State private var isConnecting: Bool = false
+
     private var connectionSelectionPane: some View {
         VStack(spacing: 16) {
             Text("SwiftShelf").font(.title2)
-            VStack(spacing: 8) {
-                TextField("Host", text: $vm.host)
-                    .padding(10)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(Color(.init(red: 0.15, green: 0.15, blue: 0.18, alpha: 1)))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(Color.white.opacity(0.6), lineWidth: 2)
-                    )
-                    .autocapitalization(.none)
-                    .disableAutocorrection(true)
 
-                SecureField("API Key", text: $vm.apiKey)
-                    .padding(10)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(Color(.init(red: 0.15, green: 0.15, blue: 0.18, alpha: 1)))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(Color.white.opacity(0.6), lineWidth: 2)
-                    )
+            // Host field (always shown)
+            TextField("Host (e.g., https://abs.example.com)", text: $vm.host)
+                .padding(10)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color(.init(red: 0.15, green: 0.15, blue: 0.18, alpha: 1)))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.white.opacity(0.6), lineWidth: 2)
+                )
+                .autocapitalization(.none)
+                .disableAutocorrection(true)
+
+            // Login method picker
+            Picker("Login Method", selection: $connectionLoginMethod) {
+                ForEach(LoginMethod.allCases) { method in
+                    Text(method.rawValue).tag(method)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding(.vertical, 8)
+
+            // Credentials based on selected method
+            VStack(spacing: 8) {
+                switch connectionLoginMethod {
+                case .apiKey:
+                    SecureField("API Key", text: $vm.apiKey)
+                        .padding(10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color(.init(red: 0.15, green: 0.15, blue: 0.18, alpha: 1)))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.white.opacity(0.6), lineWidth: 2)
+                        )
+                case .userPass:
+                    TextField("Username", text: $connectionUsername)
+                        .padding(10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color(.init(red: 0.15, green: 0.15, blue: 0.18, alpha: 1)))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.white.opacity(0.6), lineWidth: 2)
+                        )
+                        .autocapitalization(.none)
+                        .disableAutocorrection(true)
+
+                    SecureField("Password", text: $connectionPassword)
+                        .padding(10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color(.init(red: 0.15, green: 0.15, blue: 0.18, alpha: 1)))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.white.opacity(0.6), lineWidth: 2)
+                        )
+                }
             }
             .onAppear {
                 #if DEBUG
@@ -379,17 +423,31 @@ struct ContentView: View {
 
             Button {
                 Task {
-                    vm.saveCredentialsToKeychain(host: vm.host, apiKey: vm.apiKey)
-                    await vm.connect()
+                    isConnecting = true
+                    switch connectionLoginMethod {
+                    case .apiKey:
+                        vm.saveCredentialsToKeychain(host: vm.host, apiKey: vm.apiKey)
+                        await vm.connect()
+                    case .userPass:
+                        let success = await vm.loginWithCredentials(
+                            host: vm.host,
+                            username: connectionUsername,
+                            password: connectionPassword
+                        )
+                        if success {
+                            await vm.connect()
+                        }
+                    }
+                    isConnecting = false
                 }
             } label: {
-                if vm.isLoadingLibraries {
+                if isConnecting || vm.isLoadingLibraries {
                     ProgressView()
                 } else {
                     Text("Connect").bold()
                 }
             }
-            .disabled(vm.host.isEmpty || vm.apiKey.isEmpty)
+            .disabled(vm.host.isEmpty || isConnecting || (connectionLoginMethod == .apiKey && vm.apiKey.isEmpty) || (connectionLoginMethod == .userPass && (connectionUsername.isEmpty || connectionPassword.isEmpty)))
 
             Button("Select Libraries") {
                 showSelection = true
@@ -599,16 +657,15 @@ struct ContentView: View {
                 )
                 .ignoresSafeArea()
             }
-            
+
             // Dark overlay to ensure text readability
             Color.black.opacity(0.4)
                 .ignoresSafeArea()
-            
+
             // Main content
             if let current = audioManager.currentItem {
                 let chapters = current.chapters
-                @State var pageIndex: Int = 0
-                
+
                 VStack(spacing: 40) {
                     HStack(alignment: .center, spacing: 80) {
                         // Left side: Large cover art
@@ -746,20 +803,20 @@ struct ContentView: View {
                         await loadCover(for: current)
                     }
                 }
-                
+
             } else {
                 // Nothing playing state
                 VStack(spacing: 32) {
                     Image(systemName: "music.note")
                         .font(.system(size: 100))
                         .foregroundColor(.white.opacity(0.6))
-                    
+
                     VStack(spacing: 8) {
                         Text("Nothing Playing")
                             .font(.largeTitle)
                             .fontWeight(.bold)
                             .foregroundColor(.white)
-                        
+
                         Text("Select an audiobook to start listening")
                             .font(.title3)
                             .foregroundColor(.white.opacity(0.7))
@@ -769,6 +826,10 @@ struct ContentView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onPlayPauseCommand {
+            print("[NowPlayingView] 🎮 onPlayPauseCommand received")
+            audioManager.togglePlayPause()
+        }
     }
 
     // MARK: - tvOS Chapter Progress Display (Non-interactive)

@@ -64,6 +64,17 @@ struct LibrarySummary: Identifiable, Codable {
     let name: String
 }
 
+// MARK: - Login Response Models
+struct LoginResponse: Codable {
+    let user: LoginUser
+}
+
+struct LoginUser: Codable {
+    let id: String
+    let username: String
+    let token: String?
+}
+
 class ViewModel: ObservableObject {
     @Published var refreshToken: Int = 0
     @AppStorage("libraryItemLimit") var libraryItemLimit: Int = 10 {
@@ -190,7 +201,97 @@ class ViewModel: ObservableObject {
     private func updateLoginState() {
         isLoggedIn = !host.isEmpty && !apiKey.isEmpty
     }
-    
+
+    /// Login with username and password to obtain an API token
+    /// - Parameters:
+    ///   - host: The server host URL
+    ///   - username: The username
+    ///   - password: The password
+    /// - Returns: True if login succeeded, false otherwise
+    func loginWithCredentials(host: String, username: String, password: String) async -> Bool {
+        guard !host.isEmpty, !username.isEmpty, !password.isEmpty else {
+            errorMessage = "Host, username, and password are required"
+            return false
+        }
+
+        isLoadingLibraries = true
+        errorMessage = nil
+        defer { isLoadingLibraries = false }
+
+        guard var components = URLComponents(string: host) else {
+            errorMessage = "Invalid host URL"
+            return false
+        }
+        components.path = "/login"
+
+        guard let url = components.url else {
+            errorMessage = "Failed to construct login URL"
+            return false
+        }
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        let loginBody: [String: String] = [
+            "username": username,
+            "password": password
+        ]
+
+        do {
+            req.httpBody = try JSONEncoder().encode(loginBody)
+        } catch {
+            errorMessage = "Failed to encode login request"
+            return false
+        }
+
+        APILogger.logRequest(req, description: "Login with credentials")
+
+        do {
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            APILogger.logResponse(data, resp, description: "Login with credentials")
+
+            guard let http = resp as? HTTPURLResponse else {
+                errorMessage = "Invalid response from server"
+                return false
+            }
+
+            if http.statusCode == 401 {
+                errorMessage = "Invalid username or password"
+                return false
+            }
+
+            if http.statusCode != 200 {
+                errorMessage = "Login failed with status \(http.statusCode)"
+                return false
+            }
+
+            // Parse the response to get the token
+            let decoder = JSONDecoder()
+            let loginResponse = try decoder.decode(LoginResponse.self, from: data)
+
+            guard let token = loginResponse.user.token else {
+                errorMessage = "No token received from server"
+                return false
+            }
+
+            // Save credentials
+            saveCredentialsToKeychain(host: host, apiKey: token)
+
+            #if DEBUG
+            print("[ViewModel] Successfully logged in as \(loginResponse.user.username)")
+            #endif
+
+            return true
+
+        } catch {
+            APILogger.logError(error, description: "Login with credentials")
+            errorMessage = "Login failed: \(error.localizedDescription)"
+            return false
+        }
+    }
+
     func connect() async {
         guard !host.isEmpty, !apiKey.isEmpty else {
             errorMessage = "Host and API key required"

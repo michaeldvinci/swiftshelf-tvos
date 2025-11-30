@@ -47,7 +47,7 @@ struct SettingsView: View {
     init() {
         _draftLimit = State(initialValue: UserDefaults.standard.integer(forKey: "libraryItemLimit") == 0 ? 10 : UserDefaults.standard.integer(forKey: "libraryItemLimit"))
     }
-    
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {

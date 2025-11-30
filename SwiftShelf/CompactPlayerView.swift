@@ -182,6 +182,10 @@ struct CompactPlayerView: View {
             )
             .shadow(color: Color.black.opacity(0.4), radius: 10, x: 0, y: -2)
             .onAppear { localRate = audioManager.rate }
+            .onPlayPauseCommand {
+                print("[CompactPlayerView] 🎮 onPlayPauseCommand received")
+                audioManager.togglePlayPause()
+            }
         }
     }
     
